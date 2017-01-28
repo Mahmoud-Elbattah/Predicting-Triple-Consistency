@@ -1,0 +1,41 @@
+import org.apache.spark.ml.Pipeline
+import org.apache.spark.ml.classification.RandomForestClassifier
+import org.apache.spark.ml.classification.RandomForestClassificationModel
+import org.apache.spark.ml.feature.{StringIndexer, IndexToString, VectorIndexer}
+import org.apache.spark.ml.evaluation.MulticlassClassificationEvaluator
+import org.apache.spark.mllib.util.MLUtils
+import sqlContext.implicits._
+import org.apache.spark.mllib.linalg.Vectors
+import org.apache.spark.mllib.regression.LabeledPoint
+import org.apache.spark.ml.evaluation.BinaryClassificationEvaluator
+import org.apache.spark.ml.tuning.{ParamGridBuilder, CrossValidator}
+
+val rdd = sc.textFile("wasb:///Triples.csv")//Loading Freebase triples stored on Azure Blob storage
+val data = rdd.map(_.split(",")).map(_.map(_.toDouble))
+val labeledPoints = data.map(x => LabeledPoint(x.last,Vectors.dense(x.init)))
+val df = labeledPoints.toDF()
+
+val labelIndexer = new StringIndexer().setInputCol("label").setOutputCol("indexedLabel").fit(df)
+val featureIndexer = new VectorIndexer().setInputCol("features").setOutputCol("indexedFeatures").setMaxCategories(10000).fit(df)
+val Array(trainingData, testData) = df.randomSplit(Array(0.6, 0.4))
+
+//Creating a Random Forest model for classification
+val rf = new RandomForestClassifier().setLabelCol("indexedLabel").setFeaturesCol("indexedFeatures").setNumTrees(30).setMaxDepth(4)
+val labelConverter = new IndexToString().setInputCol("prediction").setOutputCol("predictedLabel").setLabels(labelIndexer.labels)
+val pipeline = new Pipeline().setStages(Array(labelIndexer, featureIndexer, rf, labelConverter))
+val paramGrid = new ParamGridBuilder().build()
+val evaluator = new BinaryClassificationEvaluator().setLabelCol("indexedLabel").setMetricName("areaUnderROC")
+val cv = new CrossValidator().setEstimator(pipeline).setEvaluator(evaluator).setEstimatorParamMaps(paramGrid).setNumFolds(10)
+val model = cv.fit(trainingData) 
+
+// Make predictions
+val predictions = model.transform(testData)
+// areaUnderROC or areaUnderPR
+val accuracy = evaluator.evaluate(predictions)
+accuracy
+//Saving AUC 
+val rddAUC = sc.parallelize(Array(accuracy))
+rddAUC.saveAsTextFile("wasb:///AUC_Val")
+//Saving Test Predictions
+predictions.rdd.saveAsTextFile("wasb:///Predictions_Output")
+
